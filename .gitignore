@@ -1,0 +1,31 @@
+# Environment & Secrets (CRITICAL)
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# VS Code & IDEs
+.vscode/
+.idea/
+
+# Logs & Scratch files
+*.log
+scratch/
+
+# Distribution / Packaging
+build/
+dist/
+*.egg-info/
+
+# OS files
+.DS_Store
+Thumbs.db
