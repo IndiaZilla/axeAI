@@ -1,4 +1,5 @@
-    [note for you. yes, YOU. this project is currently in development. The ideas, the logic etc. are entirely made by ME(definetly a hoo-man and not an AI). This may be unpolished, and there may be edge cases not accounted for, but it works. thanks!!!!!!!!!!!!!]    
+    {This project has been licensed under the MIT licence. Check LICENCE for details.}
+    [note for you. yes, YOU. This project is currently in development. The ideas, the logic etc are entirely conceived and made by ME(definitely a hoo-man and not an AI), though I later discovered that some(most) of my ideas were already conceived. This may be unpolished, and there may be edge cases not accounted for, but it works. thanks!!!!!!!!!!!!!]    
     
     Hello, fellow developer! Welcome to axeAI!
 
@@ -11,16 +12,16 @@
     I ntelligence
 
 
-    axeAI is an architecture meant to help solve the current bottlenecks(context drift, lack of focus, communication breakdowns, endless hallucination loops etc.) in parallel-operating agentic AI.
+    axeAI is an architecture meant to help solve the current bottlenecks(context drift, lack of focus, communication breakdowns, endless hallucination loops etc) in parallel-operating agentic AI.
     
 
-    Currently, it supports Google AI Studio API Keys, and uses the 'gemini-3.6-flash' and 'gemini-3.5-flash-lite' models.
+    Currently, it supports Google AI Studio API keys, and uses the 'gemini-3.6-flash' and 'gemini-3.5-flash-lite' models.
     
     3.6-flash is smart and not a wallet burner(58.7% on SWE‑Bench Pro, 49% on DeepSWE, 63.9% on MLE‑Bench, 83% on OSWorld‑Verified, and 1421 Elo on GDPval‑AA v2 with 17% fewer tokens on Artificial Analysis Index, up to 65% fewer output tokens on DeepSWE tasks, and a lower output token cost: $7.50 per million tokens (down from $9)..), 
     
     while Flash-lite also has a good reasoning but more importantly much cheaper($0.30 per 1M input tokens, and $2.50 per 1M output tokens), making it an optimum choice for the agents.
 
-    {sorry if this is turning into a bit of a Gemini API ad; just justifiying my choice of models}
+    {Sorry if this is turning into a bit of a Gemini API ad; I'm just justifiying my choice of models.}
     
     It will be expanded to support configurable AI models and various providers, along with local processing.
     [Check: FUTURE FEATURES]
