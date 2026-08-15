@@ -1,4 +1,4 @@
-    [note for you. yes, YOU. this is an incomplete file. I'm a 10th grader. AI has been used for coding but the ideas, the logic etc. are entirely made by ME(definetly a hoo-man and not an AI). This is an imcomplete arcitecture. I rushed through the README.md because I wanted to push the first version to GitHub asap. thanks and pls don't judge me!!!!!!!!!!!!!]    
+    [note for you. yes, YOU. this project is currently in development. The ideas, the logic etc. are entirely made by ME(definetly a hoo-man and not an AI). This may be unpolished, and there may be edge cases not accounted for, but it works. thanks!!!!!!!!!!!!!]    
     
     Hello, fellow developer! Welcome to axeAI!
 
@@ -11,10 +11,10 @@
     I ntelligence
 
 
-    axeAI is an architecture meant to help solve the current bottlenecks(context drift, lack of focus {note to self: add more limits}) in parallel-operating agentic AI.
+    axeAI is an architecture meant to help solve the current bottlenecks(context drift, lack of focus, communication breakdowns, endless hallucination loops etc.) in parallel-operating agentic AI.
     
 
-    Currently, it supports Google AI Studio API Keys, and uses the 'gemini-3.1-flash-lite' model.
+    Currently, it supports Google AI Studio API Keys, and uses the 'gemini-3.6-flash' and 'gemini-3.5-flash-lite' model.
     It will be expanded to support configurable AI models and various providers, along with local processing.
     [Check: FUTURE FEATURES]
 
@@ -31,21 +31,19 @@
         The prompt structure supports automatic context-cacheing/prompt-cacheing(reducing costs and latency).
     -> Parallel Debate mode(Board Room)
         Allows any agent to request 'S' to trigger a 'Board Room' discussion where all the agents can discuss and debate.
-    -> Multiple Review Protocal
-        Features a review by the orchestrator every 5 iteration cycles and allows the worker to trigger it on self accord.
-    -> Vertical Task Tolerance
-        {note 2 self: add about it later}
+    -> Multiple Review Protocol
+        Features a review by the orchestrator every 5 iteration cycles but also allows the worker to trigger it on-demand.
 
-    {note to self: add the rest(current features) later}
+    {there are other current features too, please explore the code for the same; they will soon be featured here}
 
 
     HOW TO RUN:
-    {note to self: add how to run guide}
-
+    step 1) Install the repo
+    step 2) Run a0.py in the respective terminal of your OS(eg for windows, run python a0.py) 
     
     HOW IT WORKS:
 
-    While axeAI in its current stage is just a proof-of-concept, and hence very simple, it would still be easier for me to explain via a simple flowchart/diagram.
+    its easier for me to explain via a simple flowchart/diagram.
 
                                                                         |---> a1.py(file for 'S', the orchestr)
     user ----"task prompt"----> a0(underlying system) ---- initialise --|---> comm_hub.py(the communication highway for the agents)
@@ -58,10 +56,8 @@
 
     {note 2 self: add the missing stuffs}
 
-p.s. I'll add an MIT licence or similar soon.
 pls don't mind the errors
-there may or mey not be soem chinese response
-    
+shashwat out
 
 
 
