@@ -14,7 +14,14 @@
     axeAI is an architecture meant to help solve the current bottlenecks(context drift, lack of focus, communication breakdowns, endless hallucination loops etc.) in parallel-operating agentic AI.
     
 
-    Currently, it supports Google AI Studio API Keys, and uses the 'gemini-3.6-flash' and 'gemini-3.5-flash-lite' model.
+    Currently, it supports Google AI Studio API Keys, and uses the 'gemini-3.6-flash' and 'gemini-3.5-flash-lite' models.
+    
+    3.6-flash is smart and not a wallet burner(58.7% on SWE‑Bench Pro, 49% on DeepSWE, 63.9% on MLE‑Bench, 83% on OSWorld‑Verified, and 1421 Elo on GDPval‑AA v2 with 17% fewer tokens on Artificial Analysis Index, up to 65% fewer output tokens on DeepSWE tasks, and a lower output token cost: $7.50 per million tokens (down from $9)..), 
+    
+    while Flash-lite also has a good reasoning but more importantly much cheaper($0.30 per 1M input tokens, and $2.50 per 1M output tokens), making it an optimum choice for the agents.
+
+    {sorry if this is turning into a bit of a Gemini API ad; just justifiying my choice of models}
+    
     It will be expanded to support configurable AI models and various providers, along with local processing.
     [Check: FUTURE FEATURES]
 
@@ -55,7 +62,6 @@
 
 
     {note 2 self: add the missing stuffs}
-
 pls don't mind the errors
 shashwat out
 
