@@ -25,6 +25,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -124,25 +125,71 @@ def _build_key_pool() -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Framework Configuration Constants
+# Framework Configuration Constants & Model Pool Delegation (Phase 1)
 # ---------------------------------------------------------------------------
-# These can be overridden via environment variables.
 
 MAX_CONCURRENT: int = int(os.environ.get("AX_MAX_CONCURRENT", "5"))
-"""Maximum number of sub-agent API calls that may run simultaneously."""
-
 BOARD_ROOM_DEBATE_ROUNDS: int = int(os.environ.get("AX_BOARDROOM_ROUNDS", "3"))
-"""Number of debate rounds the Board Room runs before producing consensus."""
 
-ORCHESTRATOR_MODEL: str = os.environ.get(
-    "AX_ORCHESTRATOR_MODEL", "gemini-2.5-flash"
-)
-"""Gemini model used by the OrchestratorAgent (a1.py)."""
+# Configured Model Pool Hierarchy
+MODEL_POOL = {
+    "HEAVY_LOGIC": os.environ.get("AX_MODEL_HEAVY", "gemini-3.7-flash"),
+    "PARSING_FORMATTING": os.environ.get("AX_MODEL_FAST", "gemini-3.1-flash-lite"),
+    "DEEP_REASONING_AUDIT": os.environ.get("AX_MODEL_PRO", "gemini-3.1-pro"),
+}
 
-SUB_AGENT_MODEL: str = os.environ.get(
-    "AX_SUB_AGENT_MODEL", "gemini-2.5-flash-lite"
-)
-"""Gemini model used by all SubAgentNodes (aG.py)."""
+# Fallback cascade order
+MODEL_FALLBACK_CASCADE = [
+    "gemini-3.1-pro",
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+]
+
+ORCHESTRATOR_BOOT_MODEL = os.environ.get("AX_ORCHESTRATOR_BOOT_MODEL", "gemini-3.1-pro")
+ORCHESTRATOR_DEFAULT_MODEL = os.environ.get("AX_ORCHESTRATOR_MODEL", "gemini-3.7-flash")
+SUB_AGENT_DEFAULT_MODEL = os.environ.get("AX_SUB_AGENT_MODEL", "gemini-3.1-flash-lite")
+
+
+async def call_model_with_cascade(
+    client,
+    model_name: str,
+    contents,
+    config,
+    fallback_cascade: list[str] | None = None,
+) -> Any:
+    """
+    Execute an API call with automatic cascade fallback across the model pool
+    if 429, 503, 502, 500, or 404 is encountered.
+    """
+    cascade = [model_name]
+    for m in (fallback_cascade or MODEL_FALLBACK_CASCADE):
+        if m not in cascade:
+            cascade.append(m)
+
+    last_exc = None
+    for current_model in cascade:
+        try:
+            logger.debug("Cascade: Attempting generation with model '%s'...", current_model)
+            response = await client.aio.models.generate_content(
+                model=current_model,
+                contents=contents,
+                config=config,
+            )
+            return response, current_model
+        except Exception as exc:
+            err_str = str(exc).lower()
+            # Retry on rate limits, server overloads, not found, or bad gateway
+            if any(code in err_str for code in ["429", "503", "502", "500", "504", "404", "resource_exhausted", "unavailable"]):
+                logger.warning("Cascade: Model '%s' encountered recoverable error: %s. Falling back to next model.", current_model, exc)
+                last_exc = exc
+                continue
+            logger.error("Cascade: Model '%s' failed with non-cascade error: %s", current_model, exc)
+            raise exc
+
+    raise RuntimeError(f"All models in cascade failed. Last error: {last_exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -152,18 +199,7 @@ SUB_AGENT_MODEL: str = os.environ.get(
 async def boot_agent_x(user_prompt: str) -> str:
     """
     Main async entry point. Wires all modules and runs one orchestration cycle.
-
-    Parameters
-    ----------
-    user_prompt : str
-        The top-level task description from the user.
-
-    Returns
-    -------
-    str
-        The final synthesised output from the OrchestratorAgent.
     """
-    # --- Import here (not at module top) to respect dependency order ---
     from context_hub import ContextHub
     from aG import AgentRegistry
     from comm_hub import CommunicationHub
@@ -175,15 +211,16 @@ async def boot_agent_x(user_prompt: str) -> str:
     logger.info("Log level  : %s", _LOG_LEVEL_NAME)
     logger.info("Max concurrent sub-agents : %d", MAX_CONCURRENT)
     logger.info("Board Room debate rounds  : %d", BOARD_ROOM_DEBATE_ROUNDS)
-    logger.info("Orchestrator model : %s", ORCHESTRATOR_MODEL)
-    logger.info("Sub-agent model    : %s", SUB_AGENT_MODEL)
+    logger.info("Orchestrator boot model    : %s", ORCHESTRATOR_BOOT_MODEL)
+    logger.info("Orchestrator default model : %s", ORCHESTRATOR_DEFAULT_MODEL)
+    logger.info("Sub-agent default model    : %s", SUB_AGENT_DEFAULT_MODEL)
     logger.info("=" * 60)
 
     api_key_pool = _build_key_pool()
 
-    # Instantiate the state database (no network calls, no dependencies)
+    # Instantiate the state database & workspace
     context_hub = ContextHub()
-    logger.info("ContextHub online.")
+    logger.info("ContextHub & WorkspaceManager online.")
 
     # Instantiate the AgentRegistry (lifecycle & creation helper)
     agent_registry = AgentRegistry(context_hub=context_hub, api_key_pool=api_key_pool)
@@ -208,8 +245,10 @@ async def boot_agent_x(user_prompt: str) -> str:
         comm_hub=comm_hub,
         context_hub=context_hub,
         agent_registry=agent_registry,
-        model_name=ORCHESTRATOR_MODEL,
-        sub_agent_model=SUB_AGENT_MODEL,
+        boot_model_name=ORCHESTRATOR_BOOT_MODEL,
+        default_model_name=ORCHESTRATOR_DEFAULT_MODEL,
+        sub_agent_model=SUB_AGENT_DEFAULT_MODEL,
+        model_pool=MODEL_POOL,
     )
     logger.info("OrchestratorAgent (S) online.")
     logger.info("axeAI — Boot complete. Starting orchestration run.")
@@ -228,8 +267,6 @@ async def boot_agent_x(user_prompt: str) -> str:
 def _register_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
     """
     Register OS signal handlers for graceful shutdown.
-    On SIGINT (Ctrl+C) or SIGTERM, cancel all running tasks and stop the loop.
-    Windows does not support loop.add_signal_handler; skip it or use standard signal on Windows.
     """
     def _shutdown(sig_name: str) -> None:
         logger.warning("Signal %s received — initiating graceful shutdown.", sig_name)
@@ -243,17 +280,76 @@ def _register_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
         except NotImplementedError:
             pass
     else:
-        # On Windows, we can use standard signal library handler for SIGINT
         def win_handler(sig, frame):
             logger.warning("SIGINT received on Windows — initiating graceful shutdown.")
-            # Schedule cancellation of all tasks on the loop
             for task in asyncio.all_tasks(loop):
                 loop.call_soon_threadsafe(task.cancel)
         try:
             signal.signal(signal.SIGINT, win_handler)
         except ValueError:
-            # signal.signal must be run in main thread, ignore if run elsewhere
             pass
+
+
+# ---------------------------------------------------------------------------
+# CLI Commands (Phase 2)
+# ---------------------------------------------------------------------------
+
+def handle_cli_commands(args: list[str]) -> bool:
+    """
+    Handle CLI subcommands:
+      axeai mount <alias> <path>
+      axeai tree
+      axeai edit <file_path>
+    Returns True if a subcommand was executed and process should exit.
+    """
+    if not args:
+        return False
+
+    cmd = args[0].lower()
+    from context_hub import WorkspaceManager
+
+    wm = WorkspaceManager()
+
+    if cmd == "mount":
+        if len(args) < 3:
+            print("Usage: python a0.py mount <alias> <path>")
+            return True
+        alias = args[1]
+        path = args[2]
+        wm.mount_directory(alias, path)
+        print(f"Mounted alias '{alias}' -> '{Path(path).resolve()}'")
+        return True
+
+    elif cmd == "tree":
+        print(wm.format_tree_display())
+        return True
+
+    elif cmd == "edit":
+        if len(args) < 2:
+            print("Usage: python a0.py edit <file_path>")
+            return True
+        target = wm.resolve_path(args[1])
+        if not target or not target.exists():
+            print(f"Error: File '{args[1]}' not found.")
+            return True
+        import subprocess
+        editor = os.environ.get("EDITOR", "notepad" if sys.platform == "win32" else "nano")
+        try:
+            subprocess.run([editor, str(target)], check=True)
+        except Exception as e:
+            print(f"Failed to open editor: {e}")
+    elif cmd == "select":
+        from win_tools import select_folder_dialog
+        alias = args[1] if len(args) > 1 else "default"
+        folder = select_folder_dialog()
+        if folder:
+            wm.mount_directory(alias, folder)
+            print(f"Mounted alias '{alias}' -> '{folder}'")
+        else:
+            print("No folder selected.")
+        return True
+
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -261,9 +357,15 @@ def _register_signal_handlers(loop: asyncio.AbstractEventLoop) -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    # Collect the user prompt from command-line args or prompt interactively
-    if len(sys.argv) > 1:
-        _user_prompt = " ".join(sys.argv[1:])
+    cli_args = sys.argv[1:]
+
+    # Check for CLI management subcommands
+    if cli_args and cli_args[0].lower() in {"mount", "tree", "edit", "select"}:
+        handle_cli_commands(cli_args)
+        sys.exit(0)
+
+    if cli_args:
+        _user_prompt = " ".join(cli_args)
     else:
         _user_prompt = input("axeAI > Enter your task: ").strip()
         if not _user_prompt:

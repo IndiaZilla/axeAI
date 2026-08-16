@@ -16,10 +16,221 @@ Design Contract:
 """
 
 import copy
+import difflib
 import json
 import logging
+import os
+from pathlib import Path
 
 logger = logging.getLogger("aX.context_hub")
+
+
+# ---------------------------------------------------------------------------
+# Workspace Context Manager (Phase 2)
+# ---------------------------------------------------------------------------
+
+class WorkspaceManager:
+    """
+    Manages local directory mounting and virtual file tree indexing.
+    Reads workspace_config.json to map aliases (e.g. "src", "docs") to paths.
+    """
+
+    EXCLUDED_DIRS = {".git", "node_modules", "__pycache__", "venv", ".venv", ".gemini", "dist", "build"}
+
+    def __init__(self, config_path: str | Path = "workspace_config.json"):
+        self.config_path = Path(config_path)
+        self.mounted_roots: dict[str, str] = {}
+        self.load_config()
+
+    def load_config(self) -> None:
+        if self.config_path.exists():
+            try:
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.mounted_roots = data.get("mounted_roots", {})
+                logger.info("WorkspaceManager: Loaded %d mounted root(s).", len(self.mounted_roots))
+            except Exception as e:
+                logger.error("WorkspaceManager: Failed to load config %s: %s", self.config_path, e)
+        else:
+            self.mounted_roots = {}
+
+    def save_config(self) -> None:
+        try:
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                json.dump({"mounted_roots": self.mounted_roots}, f, indent=2)
+            logger.info("WorkspaceManager: Saved configuration to %s", self.config_path)
+        except Exception as e:
+            logger.error("WorkspaceManager: Failed to save config: %s", e)
+
+    def mount_directory(self, alias: str, path: str) -> None:
+        abs_path = str(Path(path).resolve())
+        self.mounted_roots[alias] = abs_path
+        self.save_config()
+        logger.info("WorkspaceManager: Mounted alias '%s' -> '%s'", alias, abs_path)
+
+    def resolve_path(self, virtual_path: str) -> Path | None:
+        """
+        Resolves an alias-based path like 'src/a0.py' or an absolute/relative path.
+        """
+        parts = virtual_path.replace("\\", "/").split("/", 1)
+        if len(parts) == 2 and parts[0] in self.mounted_roots:
+            alias, subpath = parts
+            return Path(self.mounted_roots[alias]) / subpath
+
+        p = Path(virtual_path)
+        if p.exists():
+            return p.resolve()
+        return None
+
+    def build_virtual_tree(self) -> dict:
+        """
+        Crawls all mounted directories and builds a lightweight JSON tree structure.
+        """
+        tree = {}
+        for alias, root_path in self.mounted_roots.items():
+            p = Path(root_path)
+            if not p.exists():
+                tree[alias] = {"error": "Path does not exist", "path": root_path}
+                continue
+
+            def _scan(directory: Path) -> dict:
+                node: dict[str, list | dict] = {"dirs": {}, "files": []}
+                try:
+                    for item in sorted(directory.iterdir()):
+                        if item.is_dir():
+                            if item.name not in self.EXCLUDED_DIRS:
+                                node["dirs"][item.name] = _scan(item)
+                        elif item.is_file():
+                            node["files"].append(item.name)
+                except PermissionError:
+                    node["error"] = "Permission Denied"
+                return node
+
+            tree[alias] = _scan(p)
+        return tree
+
+    def format_tree_display(self) -> str:
+        """Render a readable ASCII directory tree string for CLI and context injection."""
+        lines = []
+        for alias, root_path in self.mounted_roots.items():
+            lines.append(f"[{alias}] -> {root_path}")
+            p = Path(root_path)
+            if not p.exists():
+                lines.append("   \\-- [Path Not Found]")
+                continue
+
+            def _walk(directory: Path, prefix: str = "   "):
+                try:
+                    entries = sorted(list(directory.iterdir()), key=lambda x: (x.is_file(), x.name))
+                except PermissionError:
+                    return
+                for i, item in enumerate(entries):
+                    is_last = (i == len(entries) - 1)
+                    connector = "\\-- " if is_last else "+-- "
+                    if item.is_dir():
+                        if item.name not in self.EXCLUDED_DIRS:
+                            lines.append(f"{prefix}{connector}[DIR] {item.name}/")
+                            _walk(item, prefix + ("    " if is_last else "|   "))
+                    elif item.is_file():
+                        lines.append(f"{prefix}{connector}{item.name}")
+
+            _walk(p)
+        return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Mediated RBAC Permission Matrix (Phase 3)
+# ---------------------------------------------------------------------------
+
+class PermissionMatrix:
+    """
+    Manages fine-grained agent file access tokens: READ, SUGGEST, EDIT.
+    """
+
+    def __init__(self, workspace_manager: WorkspaceManager):
+        self.workspace_manager = workspace_manager
+        # agent_id -> {file_path: token_info}
+        self.granted_tokens: dict[str, dict[str, dict]] = {}
+
+    def grant_access(self, agent_id: str, file_path: str, level: str, reason: str) -> str:
+        """
+        Grants a token for an agent. Level must be READ, SUGGEST, or EDIT.
+        """
+        level = level.upper()
+        if level not in {"READ", "SUGGEST", "EDIT"}:
+            raise ValueError(f"Invalid access level '{level}'. Must be READ, SUGGEST, or EDIT.")
+
+        if agent_id not in self.granted_tokens:
+            self.granted_tokens[agent_id] = {}
+
+        token = f"TOKEN_{agent_id}_{abs(hash(file_path + level + reason))}"
+        self.granted_tokens[agent_id][file_path] = {
+            "token": token,
+            "level": level,
+            "reason": reason,
+        }
+        logger.info("PermissionMatrix: Granted [%s] access on '%s' to agent '%s'.", level, file_path, agent_id)
+        return token
+
+    def revoke_access(self, agent_id: str, file_path: str) -> bool:
+        """
+        Revokes token for a specific file.
+        """
+        if agent_id in self.granted_tokens and file_path in self.granted_tokens[agent_id]:
+            self.granted_tokens[agent_id].pop(file_path)
+            logger.info("PermissionMatrix: Revoked access on '%s' from agent '%s'.", file_path, agent_id)
+            return True
+        return False
+
+    def revoke_all_for_agent(self, agent_id: str) -> None:
+        """
+        Revokes all tokens for a relieved or completed agent.
+        """
+        if agent_id in self.granted_tokens:
+            self.granted_tokens.pop(agent_id, None)
+            logger.info("PermissionMatrix: Revoked all file access for agent '%s'.", agent_id)
+
+    def read_file(self, agent_id: str, virtual_path: str) -> str:
+        tokens = self.granted_tokens.get(agent_id, {})
+        if virtual_path not in tokens or tokens[virtual_path]["level"] not in {"READ", "SUGGEST", "EDIT"}:
+            raise PermissionError(f"Agent '{agent_id}' does not have READ permission for '{virtual_path}'.")
+
+        resolved = self.workspace_manager.resolve_path(virtual_path)
+        if not resolved or not resolved.is_file():
+            raise FileNotFoundError(f"File '{virtual_path}' could not be resolved.")
+
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+
+    def suggest_diff(self, agent_id: str, virtual_path: str, new_content: str) -> str:
+        tokens = self.granted_tokens.get(agent_id, {})
+        if virtual_path not in tokens or tokens[virtual_path]["level"] not in {"SUGGEST", "EDIT"}:
+            raise PermissionError(f"Agent '{agent_id}' does not have SUGGEST permission for '{virtual_path}'.")
+
+        resolved = self.workspace_manager.resolve_path(virtual_path)
+        if not resolved or not resolved.is_file():
+            raise FileNotFoundError(f"File '{virtual_path}' could not be resolved.")
+
+        with open(resolved, "r", encoding="utf-8", errors="replace") as f:
+            original = f.read().splitlines(keepends=True)
+
+        new_lines = new_content.splitlines(keepends=True)
+        diff = difflib.unified_diff(original, new_lines, fromfile=f"a/{virtual_path}", tofile=f"b/{virtual_path}")
+        return "".join(diff)
+
+    def apply_edit(self, agent_id: str, virtual_path: str, content: str) -> None:
+        tokens = self.granted_tokens.get(agent_id, {})
+        if virtual_path not in tokens or tokens[virtual_path]["level"] != "EDIT":
+            raise PermissionError(f"Agent '{agent_id}' does not have EDIT permission for '{virtual_path}'.")
+
+        resolved = self.workspace_manager.resolve_path(virtual_path)
+        if not resolved:
+            raise FileNotFoundError(f"Cannot resolve path '{virtual_path}'.")
+
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        with open(resolved, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info("PermissionMatrix: Agent '%s' applied EDIT to '%s'.", agent_id, resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -29,28 +240,9 @@ logger = logging.getLogger("aX.context_hub")
 class ContextHub:
     """
     Central state database for the axeAI framework.
-
-    Memory Model
-    ------------
-    sub_agent_histories : dict[agent_id -> list[{prompt, response}]]
-        Structured chronological log of every prompt/response pair for each
-        sub-agent. Appended to by aG.execute() after each cycle. Read by aG
-        to build the static "context" block for prefix-cache integrity.
-
-    scratchpads : dict[agent_id -> dict]
-        Free-form JSON working memory per agent. Agents read and write
-        arbitrary key-value pairs here across cycles. This is the "notebook"
-        that enables cross-cycle reasoning without re-reading full history.
-
-    orchestrator_history : list[{user_prompt, final_output}]
-        Append-only log owned exclusively by a1.py (OrchestratorAgent).
-
-    checkpoints : dict[round_id -> snapshot]
-        Atomic snapshots taken before each broadcast round. Used by
-        rollback_to_checkpoint() if asyncio.TaskGroup fails.
     """
 
-    def __init__(self):
+    def __init__(self, config_path: str | Path = "workspace_config.json"):
         # --- Tier 1: Structured interaction logs ---
         self.sub_agent_histories: dict[str, list[dict]] = {}
 
@@ -58,7 +250,6 @@ class ContextHub:
         self.scratchpads: dict[str, dict] = {}
 
         # --- Global active workforce state map ---
-        # Map of agent_id -> {role: str, status: str, current_task: str}
         self.agent_workforce: dict[str, dict] = {}
 
         # --- Orchestrator log (owned by a1.py) ---
@@ -67,7 +258,11 @@ class ContextHub:
         # --- Atomic checkpoint store ---
         self.checkpoints: dict[str, dict] = {}
 
-        logger.info("ContextHub initialised — memory stores ready.")
+        # --- Workspace & RBAC Components ---
+        self.workspace_manager = WorkspaceManager(config_path=config_path)
+        self.permission_matrix = PermissionMatrix(self.workspace_manager)
+
+        logger.info("ContextHub initialised — memory stores, workspace, and RBAC ready.")
 
     # -----------------------------------------------------------------------
     # Workforce State Tracking

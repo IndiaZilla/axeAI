@@ -1,7 +1,8 @@
 # axeAI Agent Notes
 
 ## Version History
-- **v2.0**: Added Multi-Round Loop Execution, Agent Status tags (WORKING/COMPLETED/REVIEW), S-managed planning/evaluation, and dedicated AgentRegistry lifecycle separation.
+- **v1.1**: Expanded API Error Handling (503, 502, 500, 504, 429, socket errors), Cold-Start Boot Failover (`gemini-3.1-pro` -> `gemini-3.7-flash`), Dynamic Model Pool Delegation (`HEAVY_LOGIC`, `PARSING_FORMATTING`, `DEEP_REASONING_AUDIT`), WorkspaceManager Directory Mounting & Virtual Tree Indexing, Mediated File RBAC Permissions (`READ`, `SUGGEST`, `EDIT`), Outbound WebTool (`GET` with HTML sanitization & S-approved `POST`), and CLI tools.
+- **v2.0 (Historical Loop)**: Added Multi-Round Loop Execution, Agent Status tags (WORKING/COMPLETED/REVIEW), S-managed planning/evaluation, and dedicated AgentRegistry lifecycle separation.
 - **v1.0**: Core structural refactoring, prefix caching payload correction, 3-phase fault tolerance, and dumb router separation.
 
 ## Conversation Summary
@@ -10,11 +11,11 @@ This conversation clarified the intended architecture and the main design concer
 
 ### 1. Current control and data flow
 - The user prompt enters through a0.py.
-- a0.py boots the runtime and wires up the shared infrastructure, instantiating the AgentRegistry.
-- a1.py acts as the orchestrator and decides how the task should be decomposed, dynamically spawning/registering agents via AgentRegistry.
+- a0.py boots the runtime and wires up the shared infrastructure, instantiating the AgentRegistry and WorkspaceManager.
+- a1.py acts as the orchestrator and decides how the task should be decomposed, dynamically spawning/registering agents via AgentRegistry with model_pool allocations.
 - comm_hub.py routes tasks to registered sub-agents and handles concurrency, retries, and circuit-breaking. It is a dumb highway that queries AgentRegistry.
-- aG.py executes the assigned task for each sub-agent and implements AgentRegistry.
-- context_hub.py stores memory, including sub-agent history, scratchpads, checkpoints, and the global workforce state.
+- aG.py executes the assigned task for each sub-agent and implements AgentRegistry, mediated file requests, and web operations.
+- context_hub.py stores memory, including sub-agent history, scratchpads, checkpoints, the global workforce state, WorkspaceManager, and RBAC PermissionMatrix.
 
 ### 2. Multi-cycle execution
 - S loops up to max_rounds, reviewing sub-agent status (WORKING, COMPLETED, REVIEW) and deciding whether to relieve, redirect, or spawn new agents.
@@ -35,26 +36,28 @@ The framework follows this rule:
 
 ## Summary of Work Done
 
-1. **Bootstrap Core & Key Wiring (`a0.py`)**:
-   - Integrated dynamic `.env` loading and dual-chain configuration.
-   - Refactored `boot_agent_x` to instantiate `AgentRegistry` first and inject it into `CommunicationHub` and `OrchestratorAgent`.
-   - Wired bidirectional cross-references (`agent_registry.comm_hub = comm_hub`) to check key quarantine states.
-   - Replaced default POSIX signal handles with safe thread-safe Windows fallbacks (`signal.signal`) to eliminate `NotImplementedError` crashes.
+1. **Phase 0 — Expanded API Error Handling (`aG.py`, `a0.py`)**:
+   - Expanded retryable and recoverable error matching to intercept `503 Service Unavailable`, `502 Bad Gateway`, `500 Internal Server Error`, `504 Gateway Timeout`, and network connection reset exceptions.
+   - Enforced exponential backoff + jitter before activating circuit breakers.
 
-2. **Autonomous Multi-Round Orchestration (`a1.py`)**:
-   - Implemented Orchestrator (S) loop checking up to `max_rounds=10`.
-   - Structured round-based checks evaluating sub-agent statuses (`WORKING`, `COMPLETED`, `REVIEW`).
-   - Integrated the 3-phase fault tolerance pipeline allowing task redistribution to remaining healthy nodes on failure.
+2. **Phase 1 — Orchestrator S Cold Start Protocol & Model Pool Delegation (`a1.py`, `a0.py`)**:
+   - Initial cold-start bootstrap decomposes tasks using `gemini-3.1-pro` with instant failover to `gemini-3.7-flash`.
+   - Subsequent operational reviews run on `gemini-3.7-flash` / `gemini-3.6-flash`.
+   - Integrated `call_model_with_cascade()` helper with multi-tier model fallback.
+   - Enabled `model_assignment` per sub-agent (`HEAVY_LOGIC`, `PARSING_FORMATTING`, `DEEP_REASONING_AUDIT`).
 
-3. **Lifecycle Separation & Node Execution (`aG.py`)**:
-   - Created a standalone `AgentRegistry` to decouple worker creation from message routing.
-   - Restructured the execution payload to enforce the prefix-caching contract: keeping static invariants (`agent_id`, `role`, schema) at the top of context block, and shifting volatile states (`scratchpad`, `history`) to the task block.
-   - Enforced status updates and automatic `REVIEW` cycle triggers.
+3. **Phase 2 — Local Directory Mount & Virtual File Tree (`context_hub.py`, `a0.py`)**:
+   - Implemented `WorkspaceManager` with `workspace_config.json` alias tracking.
+   - Built ASCII virtual tree indexer excluding `.git`, `node_modules`, `__pycache__`, and virtualenvs.
+   - Added CLI subcommands: `python a0.py mount <alias> <path>`, `python a0.py tree`, and `python a0.py edit <file_path>`.
 
-4. **Quarantine & Routing Highway (`comm_hub.py`)**:
-   - Removed all agent factory dependencies, transforming `CommunicationHub` into a routing vehicle.
-   - Implemented thread-safe semaphores, fast-failing task groups, and sticky API key allocations with linear passive cooldown quarantines.
+4. **Phase 3 — Fine-Grained Mediated File RBAC (`context_hub.py`, `a1.py`, `aG.py`)**:
+   - Implemented `PermissionMatrix` enforcing `READ`, `SUGGEST` (git diffs), and `EDIT` access tokens.
+   - Sub-agents emit `request_file_access` / `renounce_file_access` payloads mediated strictly by S.
+   - Context is injected directly into agent scratchpads and revoked upon task completion.
 
-5. **State & Transaction Preservation (`context_hub.py`)**:
-   - Initialized a multi-tier memory store (`agent_workforce`, `sub_agent_histories`, `scratchpads`).
-   - Added deepcopy-backed transactional safety checkpointing (`save_checkpoint`, `rollback_to_checkpoint`, `commit_checkpoint`) to secure states against broadcast dropouts.
+5. **Phase 4 — Outbound HTTP Web Engine (`web_tool.py`, `a1.py`, `aG.py`)**:
+   - Implemented `WebTool` providing asynchronous `GET` (with raw HTML -> Markdown sanitization) and `POST` (gated by Orchestrator approval).
+
+6. **Roadmap (`future.md`)**:
+   - Added comprehensive cutting-edge features report (MCP integration, A2A routing, Sandboxing, ABAC, Graph Memory, and OpenTelemetry).

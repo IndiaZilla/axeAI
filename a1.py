@@ -105,7 +105,7 @@ DECOMPOSITION_SCHEMA = types.Schema(
             type=types.Type.ARRAY,
             description=(
                 "The list of sub-agent specs to execute in parallel. "
-                "Each agent gets a unique role and tightly-scoped task."
+                "Each agent gets a unique role, tightly-scoped task, and model assignment."
             ),
             items=types.Schema(
                 type=types.Type.OBJECT,
@@ -122,6 +122,13 @@ DECOMPOSITION_SCHEMA = types.Schema(
                         description=(
                             "Human-readable role title. Specific and senior. "
                             "e.g. 'Senior Python Developer', 'Security Auditor'."
+                        ),
+                    ),
+                    "model_assignment": types.Schema(
+                        type=types.Type.STRING,
+                        description=(
+                            "Allocated model from the pool: 'HEAVY_LOGIC' (3.7-flash), "
+                            "'PARSING_FORMATTING' (3.1-flash-lite), or 'DEEP_REASONING_AUDIT' (3.1-pro)."
                         ),
                     ),
                     "system_instruction": types.Schema(
@@ -220,6 +227,7 @@ ROUND_REVIEW_SCHEMA = types.Schema(
                 properties={
                     "agent_id": types.Schema(type=types.Type.STRING, description="Unique snake_case identifier."),
                     "role": types.Schema(type=types.Type.STRING, description="Specialist role title."),
+                    "model_assignment": types.Schema(type=types.Type.STRING, description="Model category ('HEAVY_LOGIC', 'PARSING_FORMATTING', 'DEEP_REASONING_AUDIT')."),
                     "system_instruction": types.Schema(type=types.Type.STRING, description="Full persona/system instructions."),
                     "task": types.Schema(type=types.Type.STRING, description="Initial sub-task assigned to the new agent.")
                 },
@@ -257,10 +265,14 @@ class OrchestratorAgent:
         The state database.
     agent_registry : AgentRegistry
         The registry helper managing node lifecycle.
-    model_name : str
-        Gemini model for the orchestrator.
+    boot_model_name : str
+        Initial cold-start model (e.g. gemini-3.1-pro).
+    default_model_name : str
+        Operational loop default model (e.g. gemini-3.7-flash).
     sub_agent_model : str
-        Gemini model name to pass to each spawned SubAgentNode.
+        Default sub-agent fallback model name.
+    model_pool : dict
+        Mapping of role archetypes to recommended models.
     """
 
     def __init__(
@@ -269,21 +281,29 @@ class OrchestratorAgent:
         comm_hub: CommunicationHub,
         context_hub,  # ContextHub — duck-typed
         agent_registry,  # AgentRegistry — duck-typed
-        model_name: str = "gemini-2.5-flash",
-        sub_agent_model: str = "gemini-2.5-flash-lite",
+        boot_model_name: str = "gemini-3.1-pro",
+        default_model_name: str = "gemini-3.7-flash",
+        sub_agent_model: str = "gemini-3.1-flash-lite",
+        model_pool: dict | None = None,
     ):
         self.comm_hub = comm_hub
         self.context_hub = context_hub
         self.agent_registry = agent_registry
-        self.model_name = model_name
+        self.boot_model_name = boot_model_name
+        self.model_name = default_model_name
         self.sub_agent_model = sub_agent_model
+        self.model_pool = model_pool or {
+            "HEAVY_LOGIC": "gemini-3.7-flash",
+            "PARSING_FORMATTING": "gemini-3.1-flash-lite",
+            "DEEP_REASONING_AUDIT": "gemini-3.1-pro",
+        }
 
         # S has its own sticky Gemini client
         self._client = genai.Client(api_key=api_key)
 
         logger.info(
-            "OrchestratorAgent (S) initialised | model: %s | sub_agent_model: %s",
-            model_name, sub_agent_model,
+            "OrchestratorAgent (S) initialised | boot_model: %s | default_model: %s | sub_agent_model: %s",
+            boot_model_name, default_model_name, sub_agent_model,
         )
 
     # -----------------------------------------------------------------------
@@ -302,21 +322,24 @@ class OrchestratorAgent:
         all_agent_results: dict[str, dict] = {}
         board_room_summaries: dict[str, str] = {}
 
-        # Round 1 Setup: Decompose the task into initial sub-agents
-        logger.info("[S] Round 1: Initial task decomposition...")
+        # Round 1 Setup: Decompose the task into initial sub-agents using cold-start model
+        logger.info("[S] Round 1: Cold-start task decomposition (model: %s)...", self.boot_model_name)
         initial_agents = await self._decompose_task(user_prompt)
 
         if not initial_agents:
             raise OrchestratorFailure("Initial decomposition produced no agents.")
 
-        # Register and configure initial agents
+        # Register and configure initial agents with model delegation
         for spec in initial_agents:
             agent_id = spec["agent_id"]
+            model_category = spec.get("model_assignment", "PARSING_FORMATTING")
+            assigned_model = self.model_pool.get(model_category, self.sub_agent_model)
+
             self.agent_registry.register_agent(
                 agent_id=agent_id,
                 role=spec["role"],
                 system_instruction=spec["system_instruction"],
-                model_name=self.sub_agent_model
+                model_name=assigned_model
             )
             self.context_hub.update_workforce_agent(
                 agent_id=agent_id,
@@ -325,7 +348,7 @@ class OrchestratorAgent:
                 current_task=spec["task"]
             )
 
-        # Main Multi-Round Loop
+        # Main Multi-Round Loop (Switch S default model for operational review)
         while current_round <= max_rounds and not overall_complete:
             round_id = f"round_{current_round}"
             logger.info("=" * 50)
@@ -363,7 +386,7 @@ class OrchestratorAgent:
             # Merge results into global tracking map
             all_agent_results.update(results)
 
-            # Process sub-agent status tag updates
+            # Process sub-agent status tag updates, file access requests, and web requests
             for aid, res in results.items():
                 agent_status = res.get("status", {})
                 status_type = agent_status.get("type", "WORKING")
@@ -372,6 +395,120 @@ class OrchestratorAgent:
                 task = workforce[aid]["current_task"]
                 self.context_hub.update_workforce_agent(aid, role, status_type, task)
                 logger.info("[%s] Declared status: %s — Msg: %s", aid, status_type, status_msg)
+
+                # Process Mediated RBAC File Requests (Phase 3)
+                file_req = res.get("file_access_request")
+                if file_req and isinstance(file_req, dict):
+                    action = file_req.get("action")
+                    files = file_req.get("files", [])
+                    level = file_req.get("level", "READ")
+                    reason = file_req.get("reason", "")
+                    edits = file_req.get("edits", {})
+
+                    if action == "request_file_access":
+                        for target_file in files:
+                            try:
+                                token = self.context_hub.permission_matrix.grant_access(
+                                    agent_id=aid, file_path=target_file, level=level, reason=reason
+                                )
+                                file_content = ""
+                                if level == "READ":
+                                    file_content = self.context_hub.permission_matrix.read_file(aid, target_file)
+                                elif level == "SUGGEST" and target_file in edits:
+                                    diff = self.context_hub.permission_matrix.suggest_diff(aid, target_file, edits[target_file])
+                                    file_content = f"Diff generated:\n{diff}"
+                                elif level == "EDIT" and target_file in edits:
+                                    self.context_hub.permission_matrix.apply_edit(aid, target_file, edits[target_file])
+                                    file_content = "Edit successfully applied."
+
+                                self.context_hub.update_scratchpad(
+                                    aid, {f"file_context_{target_file}": {"token": token, "level": level, "content": file_content}}
+                                )
+                                logger.info("[S] Mediated File Access GRANTED to '%s' for '%s' [%s].", aid, target_file, level)
+                            except Exception as file_err:
+                                logger.warning("[S] Mediated File Access FAILED for '%s': %s", aid, file_err)
+                                self.context_hub.update_scratchpad(
+                                    aid, {f"file_error_{target_file}": str(file_err)}
+                                )
+                    elif action == "renounce_file_access":
+                        for target_file in files:
+                            self.context_hub.permission_matrix.revoke_access(aid, target_file)
+                            # Purge from scratchpad to conserve context
+                            scratchpad = self.context_hub.get_scratchpad(aid)
+                            scratchpad.pop(f"file_context_{target_file}", None)
+
+                # Process In-Memory Compute Sandbox & MathEngine Requests (Phase 4)
+                compute_req = res.get("compute_request")
+                if compute_req and isinstance(compute_req, dict):
+                    req_type = compute_req.get("type")
+                    try:
+                        from compute_sandbox import MathEngine, CodeSandbox
+                        from win_tools import execute_shell_command
+
+                        if req_type == "math_expression":
+                            math_res = MathEngine.evaluate_expression(compute_req.get("expression", "0"))
+                            self.context_hub.update_scratchpad(aid, {"math_calc_result": math_res})
+                            logger.info("[S] MathEngine computed expression for '%s': %s", aid, math_res)
+                        elif req_type == "zscore_anomaly":
+                            data = compute_req.get("dataset", [])
+                            anomaly_res = MathEngine.calculate_zscore_anomalies(data)
+                            self.context_hub.update_scratchpad(aid, {"zscore_anomaly_result": anomaly_res})
+                            logger.info("[S] MathEngine anomaly analysis for '%s': %d anomalies", aid, anomaly_res.get("anomalies_detected", 0))
+                        elif req_type == "execute_script":
+                            script_content = compute_req.get("script_content", "")
+                            ext = compute_req.get("script_ext", ".py")
+                            run_res = await CodeSandbox.execute_script(script_content, ext=ext)
+                            self.context_hub.update_scratchpad(aid, {"script_execution_result": run_res})
+                            logger.info("[S] CodeSandbox executed script for '%s' (success: %s)", aid, run_res.get("success"))
+                        elif req_type == "shell_command":
+                            sh_cmd = compute_req.get("command", "")
+                            elevated = compute_req.get("elevated", False)
+                            sh_res = await execute_shell_command(sh_cmd, elevated=elevated)
+                            self.context_hub.update_scratchpad(aid, {"shell_command_result": sh_res})
+                            logger.info("[S] Shell command executed for '%s' (returncode: %s)", aid, sh_res.get("returncode"))
+                    except Exception as compute_err:
+                        logger.error("[S] Compute request execution failed for '%s': %s", aid, compute_err)
+                        self.context_hub.update_scratchpad(aid, {"compute_error": str(compute_err)})
+
+                # Process Direct A2A gibberTalk Messages (Phase 2)
+                a2a_req = res.get("a2a_message")
+                if a2a_req and isinstance(a2a_req, dict):
+                    target_id = a2a_req.get("target_agent_id")
+                    payload = a2a_req.get("payload", {})
+                    if target_id:
+                        a2a_res = await self.comm_hub.route_a2a_gibber_message(
+                            sender_id=aid, target_agent_id=target_id, payload=payload
+                        )
+                        self.context_hub.update_scratchpad(aid, {f"a2a_response_{target_id}": a2a_res})
+                        logger.info("[S] Direct A2A gibberTalk message routed: %s -> %s", aid, target_id)
+
+                # Process Outbound Web Requests (Phase 4)
+                web_req = res.get("web_request")
+                if web_req and isinstance(web_req, dict):
+                    method = web_req.get("method", "GET")
+                    url = web_req.get("url", "")
+                    data = web_req.get("data", "")
+                    web_reason = web_req.get("reason", "")
+                    try:
+                        from web_tool import WebTool
+                        wt = WebTool()
+                        if method == "GET":
+                            web_res = await wt.http_get(url)
+                            self.context_hub.update_scratchpad(
+                                aid, {f"web_result_{url}": web_res[:4000]}
+                            )
+                        elif method == "POST":
+                            logger.info("[S] S Approved Web POST to '%s' (reason: %s)", url, web_reason)
+                            web_res = await wt.http_post(url, data=data)
+                            self.context_hub.update_scratchpad(
+                                aid, {f"web_result_{url}": web_res[:2000]}
+                            )
+                        await wt.close()
+                    except Exception as web_err:
+                        logger.warning("[S] Web request failed for '%s': %s", aid, web_err)
+                        self.context_hub.update_scratchpad(
+                            aid, {f"web_error_{url}": str(web_err)}
+                        )
 
             # Handle Board Room requests from active agents
             logger.info("[S] Evaluating Board Room requests...")
@@ -392,6 +529,7 @@ class OrchestratorAgent:
                     self.context_hub.update_workforce_agent(
                         aid, workforce[aid]["role"], "RELIEVED", workforce[aid]["current_task"]
                     )
+                    self.context_hub.permission_matrix.revoke_all_for_agent(aid)
                     logger.info("[S] Relieved agent '%s'.", aid)
 
             # Apply redirections / task updates
@@ -400,7 +538,6 @@ class OrchestratorAgent:
                 comment = redir["comment"]
                 next_task = redir["next_task"]
                 if aid in workforce:
-                    # Save feedback comment into scratchpad
                     self.context_hub.update_scratchpad(aid, {"S_feedback": comment})
                     self.context_hub.update_workforce_agent(
                         aid, workforce[aid]["role"], "WORKING", next_task
@@ -410,11 +547,14 @@ class OrchestratorAgent:
             # Spawn new agents
             for new_spec in evaluation.get("new_agents", []):
                 aid = new_spec["agent_id"]
+                model_category = new_spec.get("model_assignment", "PARSING_FORMATTING")
+                assigned_model = self.model_pool.get(model_category, self.sub_agent_model)
+
                 self.agent_registry.register_agent(
                     agent_id=aid,
                     role=new_spec["role"],
                     system_instruction=new_spec["system_instruction"],
-                    model_name=self.sub_agent_model
+                    model_name=assigned_model
                 )
                 self.context_hub.update_workforce_agent(
                     agent_id=aid,
@@ -422,7 +562,7 @@ class OrchestratorAgent:
                     status="WORKING",
                     current_task=new_spec["task"]
                 )
-                logger.info("[S] Dynamically spawned new agent '%s' (%s)", aid, new_spec["role"])
+                logger.info("[S] Dynamically spawned new agent '%s' (%s) [model: %s]", aid, new_spec["role"], assigned_model)
 
             current_round += 1
 
@@ -445,24 +585,34 @@ class OrchestratorAgent:
     async def _decompose_task(self, user_prompt: str) -> list[dict]:
         """
         Call the Gemini API to decompose the user prompt into an agent plan.
+        Uses cold-start boot model with instant fallback cascade.
         """
         decomposition_prompt = (
             f"User Task:\n{user_prompt}\n\n"
             f"Decompose this task into parallelisable sub-tasks. "
             f"Create specialised agents to handle each sub-task. "
+            f"Assign an appropriate model_assignment from ['HEAVY_LOGIC', 'PARSING_FORMATTING', 'DEEP_REASONING_AUDIT']. "
             f"Each agent must have a tightly-scoped role and unambiguous task. "
             f"Produce the agent plan as a structured JSON response."
         )
 
-        response = await self._client.aio.models.generate_content(
-            model=self.model_name,
-            contents=decomposition_prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=ORCHESTRATOR_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                response_schema=DECOMPOSITION_SCHEMA,
-            ),
+        from a0 import call_model_with_cascade
+
+        config = types.GenerateContentConfig(
+            system_instruction=ORCHESTRATOR_SYSTEM_PROMPT,
+            response_mime_type="application/json",
+            response_schema=DECOMPOSITION_SCHEMA,
         )
+
+        response, used_model = await call_model_with_cascade(
+            client=self._client,
+            model_name=self.boot_model_name,
+            contents=decomposition_prompt,
+            config=config,
+            fallback_cascade=[self.boot_model_name, self.model_name, "gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite"]
+        )
+
+        logger.info("[S] Decomposition generated using model: %s", used_model)
 
         try:
             plan = json.loads(response.text)

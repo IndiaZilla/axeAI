@@ -98,21 +98,43 @@ class CommunicationHub:
         self.api_key_pool = api_key_pool
         self.context_hub = context_hub
         self.agent_registry = agent_registry
-        self.max_concurrent = max_concurrent
+        # Scale concurrency dynamically according to key pool throughput (e.g. 5 concurrent per active key)
+        self.max_concurrent = max(max_concurrent, len(api_key_pool) * 5)
         self.board_room_rounds = board_room_rounds
 
         # Circuit breaker: dead key → timestamp after which it may be re-probed
-        # Structure: { api_key: float (unix timestamp) }
         self._dead_key_cooldowns: dict[str, float] = {}
 
-        # Concurrency gate — limits simultaneous async API calls
-        self._semaphore = asyncio.Semaphore(max_concurrent)
+        # Concurrency gate — auto-scaled dynamic semaphore
+        self._semaphore = asyncio.Semaphore(self.max_concurrent)
 
         logger.info(
-            "CommunicationHub initialised | keys: %d | max_concurrent: %d | "
+            "CommunicationHub initialised | keys: %d | auto-scaled max_concurrent: %d | "
             "board_room_rounds: %d",
-            len(api_key_pool), max_concurrent, board_room_rounds,
+            len(api_key_pool), self.max_concurrent, board_room_rounds,
         )
+
+    async def route_a2a_gibber_message(self, sender_id: str, target_agent_id: str, payload: dict) -> dict:
+        """
+        Routes dense tokenized gibberTalk message directly between agents in the registry
+        without requiring Orchestrator S intervention for non-critical coordination.
+        """
+        from aG import gibber_encode, gibber_decode
+
+        token_stream = gibber_encode(payload)
+        logger.debug("comm_hub: A2A gibberTalk [%s -> %s] packed tokens: %s", sender_id, target_agent_id, token_stream)
+
+        # Retrieve target agent node from registry
+        try:
+            target_node = self.agent_registry.get_agent(target_agent_id)
+            # Route instruction to target agent directly
+            decoded = gibber_decode(token_stream)
+            prompt = f"[A2A MESSAGE from {sender_id}]\n{json.dumps(decoded)}"
+            res = await target_node.execute(prompt)
+            return {"status": "SUCCESS", "response": res}
+        except Exception as e:
+            logger.error("comm_hub: A2A gibberTalk routing error: %s", e)
+            return {"status": "ERROR", "error": str(e)}
 
     # -----------------------------------------------------------------------
     # API Key Management (Sticky Round-Robin + Circuit Breaker)

@@ -114,6 +114,18 @@ class AgentRegistry:
         logger.info("AgentRegistry: Registered agent '%s' with key prefix %s...", agent_id, assigned_key[:8])
         return agent
 
+    def terminate_agent(self, agent_id: str) -> bool:
+        """
+        Teardown a SubAgentNode instance on demand, freeing memory and resources.
+        """
+        if agent_id in self.registry:
+            node = self.registry.pop(agent_id)
+            # Revoke RBAC permissions and clean context memory
+            self.context_hub.permission_matrix.revoke_all_for_agent(agent_id)
+            logger.info("AgentRegistry: Terminated agent node '%s' and released resources.", agent_id)
+            return True
+        return False
+
     def get_agent(self, agent_id: str) -> "SubAgentNode":
         """Retrieve a registered agent by ID. Raises KeyError if not found."""
         if agent_id not in self.registry:
@@ -123,6 +135,33 @@ class AgentRegistry:
     def get_all_agents(self) -> dict[str, "SubAgentNode"]:
         """Return the dictionary of all registered agents."""
         return self.registry
+
+
+# ---------------------------------------------------------------------------
+# gibberTalk Token Optimization Protocol (Phase 2)
+# ---------------------------------------------------------------------------
+
+def gibber_encode(payload: dict) -> str:
+    """
+    Compresses an inter-agent message into a dense, minified tokenized payload.
+    Eliminates conversational intros, markdown padding, and whitespace.
+    """
+    try:
+        minified = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return minified
+    except Exception as e:
+        logger.error("gibber_encode failed: %s", e)
+        return str(payload)
+
+
+def gibber_decode(token_str: str) -> dict:
+    """
+    Decodes a dense gibberTalk token string back into structured agent dictionary.
+    """
+    try:
+        return json.loads(token_str)
+    except Exception:
+        return {"raw": token_str}
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +186,9 @@ class AgentExecutionError(Exception):
 # ---------------------------------------------------------------------------
 # SubAgent Response Schema
 # ---------------------------------------------------------------------------
-# Used by a1.py to configure response_mime_type="application/json"
-# and by aG to parse the structured output.
+# ---------------------------------------------------------------------------
+# SubAgent Response Schema
+# ---------------------------------------------------------------------------
 
 SUB_AGENT_RESPONSE_SCHEMA = {
     "type": "object",
@@ -180,32 +220,52 @@ SUB_AGENT_RESPONSE_SCHEMA = {
             },
             "required": ["type", "message"]
         },
+        "file_access_request": {
+            "type": "object",
+            "description": "Optional request to read, suggest diffs, or edit workspace files.",
+            "properties": {
+                "action": {"type": "string", "enum": ["request_file_access", "renounce_file_access"]},
+                "files": {"type": "array", "items": {"type": "string"}},
+                "level": {"type": "string", "enum": ["READ", "SUGGEST", "EDIT"]},
+                "reason": {"type": "string"},
+                "edits": {
+                    "type": "object",
+                    "description": "Optional mapping of file_path -> new_content when performing EDIT or SUGGEST."
+                }
+            },
+            "required": ["action", "files"]
+        },
+        "compute_request": {
+            "type": "object",
+            "description": "Optional request to run exact Math/SymPy calculations or execute code/scripts in sandbox.",
+            "properties": {
+                "type": {"type": "string", "enum": ["math_expression", "zscore_anomaly", "execute_script", "shell_command"]},
+                "expression": {"type": "string"},
+                "dataset": {"type": "array", "items": {"type": "number"}},
+                "script_content": {"type": "string"},
+                "script_ext": {"type": "string"},
+                "command": {"type": "string"},
+                "elevated": {"type": "boolean"}
+            }
+        },
+        "a2a_message": {
+            "type": "object",
+            "description": "Optional direct gibberTalk message/delegation to another agent in the registry.",
+            "properties": {
+                "target_agent_id": {"type": "string"},
+                "payload": {"type": "object"}
+            }
+        },
         "scratchpad_updates": {
             "type": "object",
-            "description": (
-                "Key-value pairs to persist in this agent's scratchpad for "
-                "future cycles. Keys are strings, values are JSON-serializable."
-            ),
+            "description": "Key-value pairs to persist in this agent's scratchpad.",
         },
         "board_room_request": {
             "type": "object",
-            "description": (
-                "Optional. Include ONLY if a board room debate is genuinely needed "
-                "to resolve a critical disagreement or ambiguity."
-            ),
+            "description": "Optional request for a board room debate.",
             "properties": {
-                "reason": {
-                    "type": "string",
-                    "description": "Clear justification for why a board room is needed.",
-                },
-                "mode": {
-                    "type": "string",
-                    "enum": ["parallel", "round_robin"],
-                    "description": (
-                        "parallel: all agents speak and receive simultaneously. "
-                        "round_robin: agents take turns, each seeing prior speakers."
-                    ),
-                },
+                "reason": {"type": "string"},
+                "mode": {"type": "string", "enum": ["parallel", "round_robin"]},
             },
             "required": ["reason", "mode"],
         },
@@ -215,12 +275,20 @@ SUB_AGENT_RESPONSE_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
-# Retry Configuration
+# Retry Configuration & Error Handling (Phase 0)
 # ---------------------------------------------------------------------------
 
 RETRY_MAX_ATTEMPTS: int = 3
 RETRY_BACKOFF_BASE: float = 2.0   # seconds
 RETRY_JITTER_MAX: float = 0.5     # seconds — random added to each wait
+
+# Expanded retryable error keywords covering 503, 502, 500, 504, 429, timeouts
+RETRYABLE_ERROR_PATTERNS = [
+    "429", "503", "502", "500", "504",
+    "resource_exhausted", "unavailable", "service unavailable",
+    "bad gateway", "internal server error", "gateway timeout",
+    "connection reset", "connection refused", "timeout", "timed out"
+]
 
 
 # ---------------------------------------------------------------------------
@@ -384,8 +452,8 @@ class SubAgentNode:
         for attempt in range(1, RETRY_MAX_ATTEMPTS + 1):
             try:
                 logger.debug(
-                    "[%s] API call attempt %d/%d.",
-                    self.agent_id, attempt, RETRY_MAX_ATTEMPTS,
+                    "[%s] API call attempt %d/%d (model: %s).",
+                    self.agent_id, attempt, RETRY_MAX_ATTEMPTS, self.model_name
                 )
 
                 response = await self._client.aio.models.generate_content(
@@ -436,12 +504,15 @@ class SubAgentNode:
 
             except Exception as exc:
                 last_exception = exc
-                if attempt == RETRY_MAX_ATTEMPTS:
-                    # All retries exhausted — trigger circuit breaker
+                err_msg = str(exc).lower()
+                is_retryable = any(pattern in err_msg for pattern in RETRYABLE_ERROR_PATTERNS)
+
+                if attempt == RETRY_MAX_ATTEMPTS or not is_retryable:
+                    # All retries exhausted or non-retryable fatal error
                     logger.error(
-                        "[%s] All %d retry attempts failed. Last error: %s. "
+                        "[%s] Execution failed (attempt %d/%d, retryable=%s): %s. "
                         "Raising AgentExecutionError for circuit breaker.",
-                        self.agent_id, RETRY_MAX_ATTEMPTS, exc,
+                        self.agent_id, attempt, RETRY_MAX_ATTEMPTS, is_retryable, exc,
                     )
                     raise AgentExecutionError(
                         agent_id=self.agent_id,
@@ -454,7 +525,7 @@ class SubAgentNode:
                     0, RETRY_JITTER_MAX
                 )
                 logger.warning(
-                    "[%s] Attempt %d/%d failed: %s. Retrying in %.2fs...",
+                    "[%s] Attempt %d/%d encountered recoverable error: %s. Retrying in %.2fs...",
                     self.agent_id, attempt, RETRY_MAX_ATTEMPTS, exc, wait_time,
                 )
                 await asyncio.sleep(wait_time)
