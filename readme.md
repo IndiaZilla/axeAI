@@ -1,12 +1,10 @@
+{This project has been licensed under the MIT licence. Please check LICENCE for details.}
 
+**Introductory Note:** 
+    Hey developer — yes, YOU. This project is actively in development. The ideas and architecture are my handiwork,   though I happily admit it has not been polished. Expect rough edges and some edge case errors. Still, it works(kind of). Your feedback matters, and so do your thoughts. Please, feel free to mail me at space.shashwat@gmail.com with any feedback, critiques, ideas for future development(you'll be credited), your thoughts etc. 
 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
 
-
-
-
-{This project has been licensed under the MIT licence. Check LICENCE for details.}
-
-Hey developer — yes, YOU. This project is actively in development. The ideas and architecture are my handiwork, though I happily admit it has not been polished. Expect rough edges and some edge case errors; but it works, and your feedback helps.
 
 Hello, fellow developer! Welcome to axeAI!
 
@@ -19,13 +17,13 @@ A rtificial
 I ntelligence
 
 
-axeAI is an architecture that helps address common bottlenecks (context drift, lack of focus, communication breakdowns, hallucination loops, etc.) in systems that run multiple agentic AIs in parallel.
+axeAI is an architecture that designed to address common bottlenecks (context drift, lack of focus, communication breakdowns, hallucination loops, etc.) in systems that running multiple agentic AIs in parallel.
 
 Supported model backends (configurable): Google AI Studio (default), with preconfigured usage of `gemini-3.6-flash` and `gemini-3.5-flash-lite` for cost/performance tradeoffs. The codebase is written to be provider-agnostic and extensible.
 
 MAJOR FEATURES (current):
 
-- **Orchestrator (`S`)**: Top-level coordinator implemented in `a1.py`. Splits tasks into roles and manages worker agents.
+- **Orchestrator Worker Hierarchy**: Top-level coordinator "S" implemented in `a1.py`. Splits tasks into roles and manages worker agents.
 - **JSON-enforced prompt structure**: Agents communicate using strict JSON schemas to reduce ambiguity and make parsing deterministic.
 - **Dynamic context via AI Scratchpad**: Agents can write/read a scratchpad to cache context and avoid prompt bloat.
 - **Context-caching support**: Automated prompt and context caching to reduce token usage and latency.
@@ -81,14 +79,7 @@ Notes:
 Enjoy exploring, and tell me what you'd like improved next.
 
 
-Currently, it supports Google AI Studio API keys, and uses the 'gemini-3.6-flash' and 'gemini-3.5-flash-lite' models.
-
-3.6-flash is smart and not a wallet burner(58.7% on SWE‑Bench Pro, 49% on DeepSWE, 63.9% on MLE‑Bench, 83% on OSWorld‑Verified, and 1421 Elo on GDPval‑AA v2 with 17% fewer tokens on Artificial Analysis Index, up to 65% fewer output tokens on DeepSWE tasks, and a lower output token cost: $7.50 per million tokens (down from $9)..), 
-
-while Flash-lite also has a good reasoning but more importantly much cheaper($0.30 per 1M input tokens, and $2.50 per 1M output tokens), making it an optimum choice for the agents.
-
-{Sorry if this is turning into a bit of a Gemini API ad; I'm just justifiying my choice of models.}
-
+Currently, it supports Google AI Studio API keys(gemini-3.1 and onwards, most models).
 It will be expanded to support configurable AI models and various providers, along with local processing.
 [Check: FUTURE FEATURES]
 
@@ -125,7 +116,7 @@ user ----"task prompt"----> a0(underlying system) ---- initialise --|---> comm_h
                                                                 
 S(via a1) ---- "roles and prompts" ----> a0 ---- "bootup agents" ----> aG
 
+
+-------------------------THANK YOU SO MUCH FOR CHECKING OUT THIS PROJECT------------------------
+
 {note 2 self: add rest later}
-
-
-{note 2 self: add the missing stuffs}
