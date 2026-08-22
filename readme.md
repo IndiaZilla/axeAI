@@ -74,7 +74,7 @@ FUTURE FEATURES:
 Notes:
 
 - This repo is experimental. Expect changes. Open issues for bugs and feature requests.
-- Contributions welcome — see `agents.md` and `future.md` for design context.
+- Contributions welcome, see `agents.md` and `future.md` for design context.
 
 Enjoy exploring, and tell me what you'd like improved next.
 
